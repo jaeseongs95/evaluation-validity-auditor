@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://evaluation-validity-auditor.local/integration/provider-result.v1.schema.json",
+  "title": "ProviderResult.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "kind", "output", "artifacts", "error"],
+  "properties": {
+    "schemaVersion": { "const": "1.0.0" },
+    "kind": { "enum": ["output", "adapter-error"] },
+    "output": { "oneOf": [{ "type": "null" }, { "$ref": "./evaluation-provider-summary.v1.schema.json" }] },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["artifactId", "schemaId", "locator", "digest", "targetDigest", "verified"],
+        "properties": {
+          "artifactId": { "enum": ["evaluation-validity-preflight-report", "evaluation-validity-report", "verified-evaluation-evidence-index"] },
+          "schemaId": { "type": "string", "minLength": 1 },
+          "locator": { "type": "string", "minLength": 1 },
+          "digest": { "type": "string", "pattern": "^(?:sha256:)?[a-f0-9]{64}$" },
+          "targetDigest": { "type": "string", "pattern": "^(?:sha256:)?[a-f0-9]{64}$" },
+          "verified": { "type": "boolean" }
+        }
+      }
+    },
+    "error": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "details"],
+          "properties": {
+            "code": { "enum": ["INVALID_INPUT", "MISSING_EVIDENCE", "GATE_FAILED", "INTEGRITY_FAILED"] },
+            "message": { "type": "string", "minLength": 1 },
+            "details": { "type": ["object", "null"], "additionalProperties": true }
+          }
+        }
+      ]
+    }
+  }
+}

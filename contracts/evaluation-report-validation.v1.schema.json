@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://evaluation-validity-auditor.local/contracts/evaluation-report-validation.v1.schema.json",
+  "title": "EvaluationReportValidation.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "request", "requestArtifact", "report"],
+  "properties": {
+    "schemaVersion": { "const": "1.0.0" },
+    "request": { "$ref": "./evaluation-audit-request.v1.schema.json" },
+    "requestArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["locator", "digest"],
+      "properties": {
+        "locator": { "type": "string", "minLength": 1 },
+        "digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
+      }
+    },
+    "report": { "$ref": "./evaluation-validity-report.v1.schema.json" }
+  }
+}

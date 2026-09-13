@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://evaluation-validity-auditor.local/integration/evaluation-provider-summary.v1.schema.json",
+  "title": "EvaluationProviderSummary.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "auditPhase", "auditorActorId", "targetDigest", "reportDigest", "verdict", "blockingCodes"],
+  "properties": {
+    "schemaVersion": { "const": "1.0.0" },
+    "auditPhase": { "enum": ["pre-execution", "post-execution"] },
+    "auditorActorId": { "type": "string", "format": "uuid" },
+    "targetDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "reportDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "verdict": { "enum": ["PASS", "FAIL", "BLOCKED", "NEEDS_INPUT"] },
+    "blockingCodes": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "enum": ["CHECK_PASSED", "ARTIFACT_MISSING", "ARTIFACT_UNVERIFIED", "DIGEST_MISMATCH", "FRAME_BINDING_INVALID", "FRAME_CREATED_AFTER_AUDIT", "CASE_DUPLICATE", "CASE_COUNT_MISMATCH", "CASE_ID_DIGEST_MISMATCH", "SPLIT_POLICY_INVALID", "LABEL_LEAKAGE", "CONTROL_NOT_FROZEN", "ROLE_CONFLICT", "AUDIT_AFTER_EXECUTION", "SEMANTIC_ORACLE_SUPPORTED", "LEXICAL_ORACLE_SCOPE_ONLY", "SEMANTIC_ORACLE_INADEQUATE", "INDEPENDENT_EVIDENCE_PRESENT", "SELF_REPORT_ONLY", "EVIDENCE_MISSING", "POLICY_AMBIGUOUS", "PREFLIGHT_REPORT_INVALID", "RUN_DUPLICATE", "RUN_SET_INCOMPLETE", "RESULT_PARSE_FAILED", "RESULT_SET_INCOMPLETE", "FAILURE_OMITTED", "CONTROL_CHANGED", "AGGREGATION_INVALID", "PUBLISHED_METRICS_MISMATCH", "UNSUPPORTED_FORMAT"]
+      }
+    }
+  }
+}

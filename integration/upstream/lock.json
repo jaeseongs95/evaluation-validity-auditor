@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "1.0.0",
+  "sourceRepository": "agent-governance-suite",
+  "sourcePath": "contracts/korean-prose-evaluation-validity-report.v1.schema.json",
+  "sourceDigest": "sha256:6a101da370b3a33547d169fdc18e41d2fa18aa89c7c83f34145d74ff4809f0a3",
+  "snapshotDigest": "sha256:6a101da370b3a33547d169fdc18e41d2fa18aa89c7c83f34145d74ff4809f0a3",
+  "normalization": "LF"
+}

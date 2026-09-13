@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "1.0.0",
+  "bundleDigest": "sha256:03996e2281db3e79a86d467e492ca4aaeaf38f89e802313102ffddf738f81e5c",
+  "packages": {
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
+    "fast-deep-equal": "3.1.3",
+    "fast-uri": "3.1.7",
+    "json-schema-traverse": "1.0.0"
+  }
+}

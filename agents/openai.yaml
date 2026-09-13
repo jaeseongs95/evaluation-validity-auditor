@@ -1,4 +1,6 @@
 interface:
   display_name: "Evaluation Validity Auditor"
-  short_description: "Æò°¡ ¼³°è¿Í °á°úÀÇ Å¸´ç¼ºÀ» µ¶¸³ÀûÀ¸·Î °¨»çÇÕ´Ï´Ù"
+  short_description: "í‰ê°€ ì„¤ê³„ì™€ ê²°ê³¼ì˜ íƒ€ë‹¹ì„±ì„ ë…ë¦½ì ìœ¼ë¡œ ê°ì‚¬í•©ë‹ˆë‹¤"
   default_prompt: "Use $evaluation-validity-auditor to audit this evaluation before and after execution."
+policy:
+  allow_implicit_invocation: true
