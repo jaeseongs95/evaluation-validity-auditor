@@ -11,12 +11,13 @@ const runtimePath = (() => {
 })();
 const { Ajv2020, addFormats } = await import(pathToFileURL(runtimePath).href);
 
-const requestSchema = load("contracts/evaluation-audit-request.v1.schema.json");
+const requestSchema = load("contracts/evaluation-validity-request.v1.schema.json");
+const caseRecordSchema = load("contracts/evaluation-case-record.v1.schema.json");
+const resultRecordSchema = load("contracts/evaluation-result-record.v1.schema.json");
+const aggregateClaimSchema = load("contracts/evaluation-aggregate-claim.v1.schema.json");
 const reportSchema = load("contracts/evaluation-validity-report.v1.schema.json");
-const validationSchema = load("contracts/evaluation-report-validation.v1.schema.json");
-const summarySchema = load("integration/evaluation-provider-summary.v1.schema.json");
+const validationSchema = load("contracts/evaluation-validity-validation.v1.schema.json");
 const providerResultSchema = load("integration/provider-result.v1.schema.json");
-const koreanProseSchema = load("integration/upstream/korean-prose-evaluation-validity-report.v1.schema.json");
 
 function ajv() {
   const instance = new Ajv2020({ allErrors: true, strict: true });
@@ -25,31 +26,21 @@ function ajv() {
 }
 
 const validator = ajv();
-validator.addSchema(requestSchema);
-validator.addSchema(reportSchema);
+for (const schema of [requestSchema, caseRecordSchema, resultRecordSchema, aggregateClaimSchema, reportSchema]) validator.addSchema(schema);
 export const validateRequestSchema = validator.getSchema(requestSchema.$id);
+export const validateCaseRecordSchema = validator.getSchema(caseRecordSchema.$id);
+export const validateResultRecordSchema = validator.getSchema(resultRecordSchema.$id);
+export const validateAggregateClaimSchema = validator.getSchema(aggregateClaimSchema.$id);
 export const validateReportSchema = validator.getSchema(reportSchema.$id);
 export const validateValidationSchema = validator.compile(validationSchema);
-const compatibilityValidator = ajv();
-export const validateKoreanProseSchema = compatibilityValidator.compile(koreanProseSchema);
-export const schemaDocuments = {
-  requestSchema,
-  reportSchema,
-  validationSchema,
-  summarySchema,
-  providerResultSchema,
-  koreanProseSchema,
-};
+export const schemaDocuments = { requestSchema, caseRecordSchema, resultRecordSchema, aggregateClaimSchema, reportSchema, validationSchema, providerResultSchema };
 
 export function compileAllSchemas() {
   const isolated = ajv();
-  isolated.addSchema(requestSchema);
-  isolated.addSchema(reportSchema);
+  for (const schema of [requestSchema, caseRecordSchema, resultRecordSchema, aggregateClaimSchema, reportSchema]) isolated.addSchema(schema);
   isolated.compile(validationSchema);
   const integration = ajv();
-  integration.addSchema(summarySchema);
+  integration.addSchema(reportSchema);
   integration.compile(providerResultSchema);
-  const compatibility = ajv();
-  compatibility.compile(koreanProseSchema);
   return true;
 }

@@ -2,41 +2,28 @@ import { createHash } from "node:crypto";
 import { readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 
-import { validateReportSchema, validateRequestSchema, validateValidationSchema } from "./schema-validation.mjs";
+import {
+  validateAggregateClaimSchema,
+  validateCaseRecordSchema,
+  validateReportSchema,
+  validateRequestSchema,
+  validateResultRecordSchema,
+  validateValidationSchema,
+} from "./schema-validation.mjs";
 
-const PRE_CHECKS = [
+const CONTROL_ROLES = ["fixture-manifest", "rubric", "oracle", "aggregation-rule", "timing-evidence"];
+const POST_ROLES = ["result-records", "aggregate-claim"];
+const PRE_CHECK_IDS = [
+  "ARTIFACT_INTEGRITY",
   "FRAME_FROZEN",
-  "TARGET_BOUND",
-  "CORPUS_INVENTORY_VALID",
-  "SPLIT_POLICY_VALID",
-  "LABELS_HIDDEN",
-  "RUBRIC_FROZEN",
-  "AGGREGATION_FROZEN",
+  "CASE_MANIFEST_COMPLETE",
   "ROLE_INDEPENDENCE",
-  "AUDITED_BEFORE_EXECUTION",
-  "ORACLE_FIT",
-  "NON_SELF_REPORTED_EVIDENCE",
+  "JUDGMENT_METHOD_VALID",
+  "AGGREGATION_RULE_VALID",
+  "TIMING_PROVENANCE_VALID",
+  "NO_POSTHOC_INPUT",
 ];
-
-const POST_CHECKS = [
-  "PREFLIGHT_REPORT_BOUND",
-  "RUN_SET_COMPLETE",
-  "CASE_SET_COMPLETE",
-  "FAILURES_PRESERVED",
-  "NO_POSTHOC_CONTROL_CHANGE",
-  "AGGREGATE_RECOMPUTED",
-  "PUBLISHED_METRICS_MATCH",
-];
-
-const REQUIRED_CONTROL_KINDS = [
-  "frame",
-  "corpus-manifest",
-  "labels",
-  "rubric",
-  "oracle",
-  "aggregation-policy",
-  "thresholds",
-];
+const POST_CHECK_IDS = ["RUN_SET_COMPLETE", "RESULT_RECORDS_COMPLETE", "AGGREGATE_RECOMPUTED", "CLAIM_MATCHES"];
 
 export class InputError extends Error {
   constructor(message, details = null) {
@@ -65,7 +52,7 @@ export function sha256Raw(value) {
 }
 
 function check(checkId, status, code, evidenceRefs = []) {
-  return { checkId, status, code, evidenceRefs: [...new Set(evidenceRefs)] };
+  return { checkId, status, code, evidenceRefs: [...new Set(evidenceRefs)].sort() };
 }
 
 function isWithin(root, candidate) {
@@ -73,383 +60,372 @@ function isWithin(root, candidate) {
   return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
 }
 
-async function inspectArtifacts(input) {
-  const root = await realpath(path.resolve(input.auditRoot));
+function isAbsoluteOnAnyPlatform(locator) {
+  return path.isAbsolute(locator) || path.win32.isAbsolute(locator) || path.posix.isAbsolute(locator);
+}
+
+async function inspectArtifacts(input, artifactRoot) {
+  if (typeof artifactRoot !== "string" || artifactRoot.length === 0) throw new InputError("--artifact-root is required.");
+  let root;
+  try { root = await realpath(path.resolve(artifactRoot)); }
+  catch { throw new InputError("Artifact root does not exist or cannot be resolved."); }
   const states = new Map();
   for (const artifact of input.artifacts) {
     if (states.has(artifact.artifactId)) throw new InputError(`Duplicate artifact ID: ${artifact.artifactId}`);
-    if (path.isAbsolute(artifact.locator)) throw new InputError(`Artifact locator must be relative: ${artifact.artifactId}`);
+    if (isAbsoluteOnAnyPlatform(artifact.locator)) throw new InputError(`Artifact locator must be relative: ${artifact.artifactId}`);
     const candidate = path.resolve(root, artifact.locator);
-    if (!isWithin(root, candidate)) throw new InputError(`Artifact locator escapes auditRoot: ${artifact.artifactId}`);
+    if (!isWithin(root, candidate)) throw new InputError(`Artifact locator escapes artifact root: ${artifact.artifactId}`);
     try {
       const resolved = await realpath(candidate);
-      if (!isWithin(root, resolved)) throw new InputError(`Artifact symlink escapes auditRoot: ${artifact.artifactId}`);
+      if (!isWithin(root, resolved)) throw new InputError(`Artifact symlink escapes artifact root: ${artifact.artifactId}`);
       const bytes = await readFile(resolved);
-      states.set(artifact.artifactId, {
-        artifact,
-        exists: true,
-        digestMatches: sha256Raw(bytes) === artifact.digest,
-        bytes,
-      });
+      states.set(artifact.artifactId, { artifact, exists: true, digestMatches: sha256Raw(bytes) === artifact.digest, bytes });
     } catch (error) {
       if (error instanceof InputError) throw error;
       states.set(artifact.artifactId, { artifact, exists: false, digestMatches: false, bytes: null });
     }
   }
-  return { root, states };
+  return states;
 }
 
-function byKind(states, kind) {
-  return [...states.values()].filter((state) => state.artifact.kind === kind);
+function byRole(states, role) {
+  return [...states.values()].filter((state) => state.artifact.role === role);
 }
 
-function currentEvidence(states) {
-  return [...states.values()]
-    .filter((state) => state.exists && state.digestMatches && state.artifact.verified)
-    .map((state) => ({
-      artifactId: state.artifact.artifactId,
-      kind: state.artifact.kind,
-      locator: state.artifact.locator.replaceAll("\\", "/"),
-      digest: state.artifact.digest,
-    }))
-    .sort((left, right) => left.artifactId.localeCompare(right.artifactId));
-}
-
-function parseJson(state, label) {
-  if (!state?.exists || !state.bytes) throw new InputError(`${label} is missing.`);
-  if (state.artifact.format !== "json") throw new InputError(`${label} must use JSON format.`);
-  const value = JSON.parse(state.bytes.toString("utf8"));
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new InputError(`${label} must contain a JSON object.`);
-  return value;
-}
-
-function parseJsonl(state, label) {
-  if (!state?.exists || !state.bytes) throw new InputError(`${label} is missing.`);
-  if (state.artifact.format !== "jsonl") throw new InputError(`${label} must use JSONL format.`);
-  const text = state.bytes.toString("utf8");
-  const records = text.split(/\r?\n/u).filter((line) => line.length > 0).map((line) => JSON.parse(line));
-  if (records.some((record) => !record || typeof record !== "object" || Array.isArray(record))) {
-    throw new InputError(`${label} must contain one JSON object per line.`);
-  }
-  return records;
-}
-
-function artifactHealth(state) {
-  if (!state?.exists) return ["INSUFFICIENT_EVIDENCE", "ARTIFACT_MISSING"];
-  if (!state.artifact.verified) return ["INSUFFICIENT_EVIDENCE", "ARTIFACT_UNVERIFIED"];
-  if (!state.digestMatches) return ["FAIL", "DIGEST_MISMATCH"];
-  return ["PASS", "CHECK_PASSED"];
-}
-
-function oneKind(states, kind) {
-  const matches = byKind(states, kind);
+function oneRole(states, role) {
+  const matches = byRole(states, role);
   return matches.length === 1 ? matches[0] : null;
 }
 
-function parseManifest(state, input) {
-  const records = parseJsonl(state, "corpus manifest");
-  const ids = records.map((record) => record[input.inventory.caseIdField]);
-  const validIds = ids.every((id) => typeof id === "string" && id.length > 0);
-  const duplicate = validIds && new Set(ids).size !== ids.length;
-  const countMatches = records.length === input.inventory.expectedCaseCount;
-  const digestMatches = validIds && sha256Canonical(ids) === input.inventory.expectedCaseIdsDigest;
-  const splitCounts = {};
-  let splitValid = true;
-  if (input.inventory.splitPolicy === "none") {
-    splitValid = input.inventory.splitField === null;
-  } else {
-    splitValid = typeof input.inventory.splitField === "string";
-    if (splitValid) {
-      for (const record of records) {
-        const split = record[input.inventory.splitField];
-        if (typeof split !== "string" || split.length === 0) {
-          splitValid = false;
-          continue;
-        }
-        splitCounts[split] = (splitCounts[split] ?? 0) + 1;
-      }
-    }
-  }
-  return { records, ids, validIds, duplicate, countMatches, digestMatches, splitCounts, splitValid };
+function artifactIds(states, roles) {
+  return [...states.values()].filter((state) => roles.includes(state.artifact.role)).map((state) => state.artifact.artifactId);
 }
 
-function structuralPreChecks(input, states) {
-  const checks = [];
-  const evidence = (kind) => byKind(states, kind).map((state) => state.artifact.artifactId);
-  const uniqueKinds = REQUIRED_CONTROL_KINDS.every((kind) => byKind(states, kind).length === 1);
-  const controlStates = REQUIRED_CONTROL_KINDS.flatMap((kind) => byKind(states, kind));
-  const missing = !uniqueKinds || controlStates.some((state) => !state.exists);
-  const unverified = controlStates.some((state) => state.exists && !state.artifact.verified);
-  const changed = controlStates.some((state) => state.exists && !state.digestMatches);
-  let frame = null;
-  let frameValid = false;
-  const frameState = oneKind(states, "frame");
-  if (frameState?.exists && frameState.digestMatches && frameState.artifact.verified && frameState.artifact.format === "json") {
-    try {
-      frame = parseJson(frameState, "evaluation frame");
-      const bound = Object.fromEntries(input.artifacts
-        .filter((artifact) => REQUIRED_CONTROL_KINDS.includes(artifact.kind) && artifact.kind !== "frame")
-        .map((artifact) => [artifact.artifactId, artifact.digest]));
-      frameValid = frame.schemaVersion === "1.0.0"
-        && frame.evaluationId === input.target.evaluationId
-        && frame.candidateDigest === input.target.candidateDigest
-        && frame.corpusDigest === input.target.corpusDigest
-        && frame.runBudget === input.inventory.expectedRunIds.length
-        && canonicalJson(frame.artifactDigests) === canonicalJson(bound);
-    } catch {
-      frameValid = false;
-    }
-  }
-  const frameStatus = missing
-    ? check("FRAME_FROZEN", "INSUFFICIENT_EVIDENCE", "ARTIFACT_MISSING", controlStates.map((state) => state.artifact.artifactId))
-    : unverified ? check("FRAME_FROZEN", "INSUFFICIENT_EVIDENCE", "ARTIFACT_UNVERIFIED", controlStates.map((state) => state.artifact.artifactId))
-    : changed ? check("FRAME_FROZEN", "FAIL", "DIGEST_MISMATCH", controlStates.map((state) => state.artifact.artifactId))
-      : frameValid ? check("FRAME_FROZEN", "PASS", "CHECK_PASSED", controlStates.map((state) => state.artifact.artifactId))
-        : check("FRAME_FROZEN", "FAIL", "FRAME_BINDING_INVALID", evidence("frame"));
-  checks.push(frameStatus);
+function artifactIntegrityCheck(input, states) {
+  const requiredRoles = input.auditStage === "post-execution" ? [...CONTROL_ROLES, ...POST_ROLES] : CONTROL_ROLES;
+  const missingRole = requiredRoles.some((role) => {
+    const count = byRole(states, role).length;
+    return role === "result-records" ? count < 1 : count !== 1;
+  });
+  const duplicateRole = requiredRoles.some((role) => role !== "result-records" && byRole(states, role).length > 1);
+  const relevant = [...states.values()];
+  const missing = relevant.some((state) => !state.exists);
+  const mismatched = relevant.some((state) => state.exists && !state.digestMatches);
+  const refs = relevant.map((state) => state.artifact.artifactId);
+  if (duplicateRole) return check("ARTIFACT_INTEGRITY", "FAIL", "REQUIRED_ARTIFACT_ROLE_INVALID", refs);
+  if (missingRole) return check("ARTIFACT_INTEGRITY", "BLOCKED", "REQUIRED_ARTIFACT_ROLE_INVALID", refs);
+  if (mismatched) return check("ARTIFACT_INTEGRITY", "FAIL", "DIGEST_MISMATCH", refs);
+  if (missing) return check("ARTIFACT_INTEGRITY", "BLOCKED", "ARTIFACT_MISSING", refs);
+  return check("ARTIFACT_INTEGRITY", "PASS", "CHECK_PASSED", refs);
+}
 
-  const manifestState = oneKind(states, "corpus-manifest");
-  const targetBound = frameState?.digestMatches && frameState.artifact.digest === input.target.frameDigest
-    && manifestState?.digestMatches && manifestState.artifact.digest === input.target.corpusDigest
-    && manifestState.artifact.artifactId === input.inventory.manifestArtifactId;
-  checks.push(targetBound
-    ? check("TARGET_BOUND", "PASS", "CHECK_PASSED", [...evidence("frame"), ...evidence("corpus-manifest")])
-    : check("TARGET_BOUND", "FAIL", "FRAME_BINDING_INVALID", [...evidence("frame"), ...evidence("corpus-manifest")]));
-
-  let manifest = null;
+function parseJsonState(state, validator) {
+  if (!state?.exists || !state.digestMatches || state.artifact.mediaType !== "json") return { ok: false, code: "ARTIFACT_MISSING", value: null };
   try {
-    manifest = manifestState?.digestMatches && manifestState.artifact.verified ? parseManifest(manifestState, input) : null;
+    const value = JSON.parse(state.bytes.toString("utf8"));
+    if (!value || typeof value !== "object" || Array.isArray(value)) return { ok: false, code: "AGGREGATE_CLAIM_INVALID", value: null };
+    if (validator && !validator(value)) return { ok: false, code: "AGGREGATE_CLAIM_INVALID", value: null };
+    return { ok: true, code: "CHECK_PASSED", value };
   } catch {
-    manifest = null;
+    return { ok: false, code: "AGGREGATE_CLAIM_INVALID", value: null };
   }
-  const inventoryCode = !manifest ? "ARTIFACT_MISSING"
-    : manifest.duplicate ? "CASE_DUPLICATE"
-      : !manifest.countMatches ? "CASE_COUNT_MISMATCH"
-        : !manifest.digestMatches ? "CASE_ID_DIGEST_MISMATCH" : "CHECK_PASSED";
-  checks.push(check("CORPUS_INVENTORY_VALID", inventoryCode === "CHECK_PASSED" ? "PASS" : inventoryCode === "ARTIFACT_MISSING" ? "INSUFFICIENT_EVIDENCE" : "FAIL", inventoryCode, evidence("corpus-manifest")));
-  checks.push(check("SPLIT_POLICY_VALID", manifest?.splitValid ? "PASS" : manifest ? "FAIL" : "INSUFFICIENT_EVIDENCE", manifest?.splitValid ? "CHECK_PASSED" : manifest ? "SPLIT_POLICY_INVALID" : "ARTIFACT_MISSING", evidence("corpus-manifest")));
+}
 
-  const labels = oneKind(states, "labels");
-  const labelsHealthy = labels?.exists && labels.digestMatches && labels.artifact.verified;
-  const labelsHidden = labelsHealthy && labels.artifact.availability === "post-execution" && !labels.artifact.visibleToRoles.includes("evaluator");
-  checks.push(check("LABELS_HIDDEN", !labelsHealthy ? "INSUFFICIENT_EVIDENCE" : labelsHidden ? "PASS" : "FAIL", !labelsHealthy ? "ARTIFACT_MISSING" : labelsHidden ? "CHECK_PASSED" : "LABEL_LEAKAGE", evidence("labels")));
-
-  for (const [checkId, kind] of [["RUBRIC_FROZEN", "rubric"], ["AGGREGATION_FROZEN", "aggregation-policy"]]) {
-    const state = oneKind(states, kind);
-    const [status, code] = artifactHealth(state);
-    let effectiveStatus = status;
-    let effectiveCode = code;
-    if (status === "PASS" && kind === "aggregation-policy") {
-      try {
-        const policy = parseJson(state, "aggregation policy");
-        const metrics = policy.metrics;
-        const ids = Array.isArray(metrics) ? metrics.map((metric) => metric.metricId) : [];
-        const valid = policy.schemaVersion === "1.0.0" && policy.denominator === "all-expected-results"
-          && Array.isArray(metrics) && metrics.length > 0 && new Set(ids).size === ids.length
-          && metrics.every((metric) => metric && typeof metric.metricId === "string" && ["rate", "mean", "sum"].includes(metric.operation));
-        if (!valid) { effectiveStatus = "FAIL"; effectiveCode = "AGGREGATION_INVALID"; }
-      } catch { effectiveStatus = "FAIL"; effectiveCode = "AGGREGATION_INVALID"; }
+function parseJsonlState(state, validator, schemaCode) {
+  if (!state?.exists || !state.digestMatches) return { ok: false, code: "ARTIFACT_MISSING", records: [] };
+  if (state.artifact.mediaType !== "jsonl") return { ok: false, code: schemaCode, records: [] };
+  const records = [];
+  try {
+    for (const line of state.bytes.toString("utf8").split(/\r?\n/u)) {
+      if (!line.trim()) continue;
+      const record = JSON.parse(line);
+      if (!validator(record)) return { ok: false, code: schemaCode, records };
+      records.push(record);
     }
-    checks.push(check(checkId, effectiveStatus, effectiveStatus === "PASS" ? "CHECK_PASSED" : effectiveCode === "DIGEST_MISMATCH" ? "CONTROL_NOT_FROZEN" : effectiveCode, evidence(kind)));
+  } catch {
+    return { ok: false, code: "JSONL_PARSE_FAILED", records };
   }
+  return { ok: true, code: "CHECK_PASSED", records };
+}
 
-  const auditor = input.actors.auditorId;
-  const producers = [...input.actors.authorIds, ...input.actors.evaluatorIds, ...input.actors.adjudicatorIds];
-  const independent = input.actors.authorIds.length > 0 && input.actors.evaluatorIds.length > 0
-    && !producers.includes(auditor)
-    && input.actors.evaluatorIds.every((id) => !input.actors.adjudicatorIds.includes(id));
-  checks.push(check("ROLE_INDEPENDENCE", independent ? "PASS" : "FAIL", independent ? "CHECK_PASSED" : "ROLE_CONFLICT"));
+function frameCheck(input) {
+  const frozenAt = Date.parse(input.frozenAt);
+  const auditedAt = Date.parse(input.auditedAt);
+  const startedAt = input.executionStartedAt === null ? null : Date.parse(input.executionStartedAt);
+  if (frozenAt > auditedAt) return check("FRAME_FROZEN", "FAIL", "FRAME_FROZEN_AFTER_AUDIT");
+  if (startedAt !== null && frozenAt > startedAt) return check("FRAME_FROZEN", "FAIL", "FRAME_FROZEN_AFTER_EXECUTION");
+  if (input.auditStage === "pre-execution" && startedAt !== null && auditedAt > startedAt) return check("FRAME_FROZEN", "FAIL", "AUDIT_NOT_PRE_EXECUTION");
+  return check("FRAME_FROZEN", "PASS", "CHECK_PASSED");
+}
 
-  const executionStart = input.target.executionStartedAt;
-  if (input.auditPhase === "pre-execution") {
-    const frameWasFrozen = Date.parse(input.target.frameCreatedAt) <= Date.parse(input.auditedAt);
-    const timely = executionStart === null || Date.parse(input.auditedAt) <= Date.parse(executionStart);
-    checks.push(check("AUDITED_BEFORE_EXECUTION", frameWasFrozen && timely ? "PASS" : "FAIL", !frameWasFrozen ? "FRAME_CREATED_AFTER_AUDIT" : timely ? "CHECK_PASSED" : "AUDIT_AFTER_EXECUTION"));
-  } else {
-    const preflightState = oneKind(states, "preflight-report");
-    let preflight = null;
-    try { preflight = parseJson(preflightState, "preflight report"); } catch { preflight = null; }
-    const preflightTiming = preflightState?.digestMatches && preflightState.artifact.verified
-      && preflight && validateReportSchema(preflight) && preflight.auditPhase === "pre-execution"
-      && sameTarget(preflight, input)
-      && preflight.checks.some((item) => item.checkId === "AUDITED_BEFORE_EXECUTION" && item.status === "PASS")
-      && (executionStart === null || Date.parse(preflight.auditedAt) <= Date.parse(executionStart));
-    checks.push(check("AUDITED_BEFORE_EXECUTION", preflightTiming ? "PASS" : preflight ? "FAIL" : "INSUFFICIENT_EVIDENCE", preflightTiming ? "CHECK_PASSED" : preflight ? "PREFLIGHT_REPORT_INVALID" : "ARTIFACT_MISSING", evidence("preflight-report")));
+function parseCaseManifest(input, states) {
+  const state = oneRole(states, "fixture-manifest");
+  const parsed = parseJsonlState(state, validateCaseRecordSchema, "CASE_SCHEMA_INVALID");
+  const refs = state ? [state.artifact.artifactId] : [];
+  if (!parsed.ok) return { check: check("CASE_MANIFEST_COMPLETE", parsed.code === "ARTIFACT_MISSING" ? "BLOCKED" : "FAIL", parsed.code, refs), records: parsed.records };
+  const ids = parsed.records.map((record) => record.caseId);
+  if (new Set(ids).size !== ids.length) return { check: check("CASE_MANIFEST_COMPLETE", "FAIL", "CASE_DUPLICATE", refs), records: parsed.records };
+  const expected = input.expected.caseIds;
+  const missing = expected.filter((id) => !ids.includes(id));
+  const unknown = ids.filter((id) => !expected.includes(id));
+  if (missing.length > 0) return { check: check("CASE_MANIFEST_COMPLETE", "FAIL", "CASE_MISSING", refs), records: parsed.records };
+  if (unknown.length > 0) return { check: check("CASE_MANIFEST_COMPLETE", "FAIL", "CASE_UNKNOWN", refs), records: parsed.records };
+  if (canonicalJson(ids) !== canonicalJson(expected)) return { check: check("CASE_MANIFEST_COMPLETE", "FAIL", "CASE_ORDER_MISMATCH", refs), records: parsed.records };
+  return { check: check("CASE_MANIFEST_COMPLETE", "PASS", "CHECK_PASSED", refs), records: parsed.records };
+}
+
+function roleCheck(input) {
+  const { authorIds, executorIds, judgeIds, auditorId } = input.actors;
+  const producers = [...authorIds, ...executorIds, ...judgeIds];
+  const judgeConflict = judgeIds.some((id) => authorIds.includes(id) || executorIds.includes(id));
+  return producers.includes(auditorId) || judgeConflict
+    ? check("ROLE_INDEPENDENCE", "FAIL", "ROLE_CONFLICT")
+    : check("ROLE_INDEPENDENCE", "PASS", "CHECK_PASSED");
+}
+
+function methodCheck(input, states) {
+  const ids = input.criteria.map((criterion) => criterion.criterionId);
+  if (new Set(ids).size !== ids.length || canonicalJson([...ids].sort()) !== canonicalJson([...input.expected.criterionIds].sort())) {
+    return check("JUDGMENT_METHOD_VALID", "FAIL", "JUDGMENT_METHOD_MISMATCH");
   }
-
-  const artifactIds = new Set(input.artifacts.map((artifact) => artifact.artifactId));
-  for (const checkId of ["ORACLE_FIT", "NON_SELF_REPORTED_EVIDENCE"]) {
-    const judgments = input.semanticJudgments.filter((item) => item.checkId === checkId);
-    if (judgments.length !== 1) {
-      checks.push(check(checkId, "INSUFFICIENT_EVIDENCE", "EVIDENCE_MISSING"));
-      continue;
+  const artifactIdSet = new Set(states.keys());
+  for (const criterion of input.criteria) {
+    const methods = criterion.judgmentMethods;
+    if (criterion.kind === "semantic" && !methods.includes("independent-review")) {
+      if (methods.length === 1 && methods[0] === "self-report") return check("JUDGMENT_METHOD_VALID", "FAIL", "SELF_REPORT_ONLY", criterion.evidenceRefs);
+      if (methods.includes("lexical-match")) return check("JUDGMENT_METHOD_VALID", "FAIL", "SEMANTIC_LEXICAL_ONLY", criterion.evidenceRefs);
+      return check("JUDGMENT_METHOD_VALID", "FAIL", "JUDGMENT_METHOD_MISMATCH", criterion.evidenceRefs);
     }
-    const judgment = judgments[0];
-    const allowedCodes = checkId === "ORACLE_FIT"
-      ? { PASS: ["SEMANTIC_ORACLE_SUPPORTED", "LEXICAL_ORACLE_SCOPE_ONLY"], FAIL: ["SEMANTIC_ORACLE_INADEQUATE"], INSUFFICIENT_EVIDENCE: ["EVIDENCE_MISSING"], NEEDS_INPUT: ["POLICY_AMBIGUOUS"] }
-      : { PASS: ["INDEPENDENT_EVIDENCE_PRESENT"], FAIL: ["SELF_REPORT_ONLY"], INSUFFICIENT_EVIDENCE: ["EVIDENCE_MISSING"], NEEDS_INPUT: ["POLICY_AMBIGUOUS"] };
-    const bound = judgment.auditorActorId === auditor && judgment.evidenceRefs.every((ref) => artifactIds.has(ref) && states.get(ref)?.artifact.verified && states.get(ref)?.digestMatches);
-    const coherent = allowedCodes[judgment.status]?.includes(judgment.code);
-    checks.push(bound && coherent ? check(checkId, judgment.status, judgment.code, judgment.evidenceRefs) : check(checkId, bound ? "FAIL" : "INSUFFICIENT_EVIDENCE", bound ? "POLICY_AMBIGUOUS" : "EVIDENCE_MISSING", judgment.evidenceRefs));
+    if (criterion.kind === "deterministic" && !methods.some((method) => ["deterministic-oracle", "lexical-match"].includes(method))) {
+      return check("JUDGMENT_METHOD_VALID", "FAIL", methods.length === 1 && methods[0] === "self-report" ? "SELF_REPORT_ONLY" : "JUDGMENT_METHOD_MISMATCH", criterion.evidenceRefs);
+    }
+    const oracle = criterion.oracleArtifactId ? states.get(criterion.oracleArtifactId) : null;
+    if (!oracle || oracle.artifact.role !== "oracle" || !oracle.exists || !oracle.digestMatches || criterion.evidenceRefs.some((ref) => !artifactIdSet.has(ref))) {
+      return check("JUDGMENT_METHOD_VALID", "FAIL", "ORACLE_BINDING_INVALID", [criterion.oracleArtifactId, ...criterion.evidenceRefs].filter(Boolean));
+    }
+    if (criterion.kind === "semantic" && criterion.evidenceRefs.length === 0) return check("JUDGMENT_METHOD_VALID", "BLOCKED", "PROVENANCE_MISSING");
   }
-  return { checks, manifest, frame };
+  return check("JUDGMENT_METHOD_VALID", "PASS", "CHECK_PASSED", input.criteria.flatMap((criterion) => [criterion.oracleArtifactId, ...criterion.evidenceRefs]).filter(Boolean));
 }
 
-function reportTarget(input) {
-  return {
-    evaluationId: input.target.evaluationId,
-    frameDigest: input.target.frameDigest,
-    candidateDigest: input.target.candidateDigest,
-    corpusDigest: input.target.corpusDigest,
-    revision: input.target.revision,
-  };
+function aggregationRuleCheck(input, states) {
+  const state = oneRole(states, "aggregation-rule");
+  if (!state?.exists || !state.digestMatches) return check("AGGREGATION_RULE_VALID", "BLOCKED", "ARTIFACT_MISSING", state ? [state.artifact.artifactId] : []);
+  if (state.artifact.mediaType !== "json") return check("AGGREGATION_RULE_VALID", "FAIL", "AGGREGATION_INVALID", [state.artifact.artifactId]);
+  let rule;
+  try { rule = JSON.parse(state.bytes.toString("utf8")); } catch { return check("AGGREGATION_RULE_VALID", "FAIL", "AGGREGATION_INVALID", [state.artifact.artifactId]); }
+  const metricIds = input.metrics.map((metric) => metric.metricId);
+  const valid = rule?.schemaVersion === "1.0.0"
+    && rule.denominator === "all-expected-records"
+    && Array.isArray(rule.metricIds)
+    && new Set(metricIds).size === metricIds.length
+    && canonicalJson([...rule.metricIds].sort()) === canonicalJson([...metricIds].sort())
+    && input.metrics.every((metric) => input.expected.criterionIds.includes(metric.criterionId));
+  return check("AGGREGATION_RULE_VALID", valid ? "PASS" : "FAIL", valid ? "CHECK_PASSED" : "AGGREGATION_INVALID", [state.artifact.artifactId]);
 }
 
-function sameTarget(report, input) {
-  return canonicalJson(report.target) === canonicalJson(reportTarget(input));
+function provenanceCheck(states) {
+  const controls = [...states.values()].filter((state) => CONTROL_ROLES.includes(state.artifact.role));
+  const missing = controls.some((state) => state.artifact.provenance === null);
+  return missing
+    ? check("TIMING_PROVENANCE_VALID", "BLOCKED", "PROVENANCE_MISSING", controls.map((state) => state.artifact.artifactId))
+    : check("TIMING_PROVENANCE_VALID", "PASS", "CHECK_PASSED", controls.flatMap((state) => state.artifact.provenance.evidenceRefs));
 }
 
-function resultRecordsForRun(states, run) {
-  if (run.status !== "completed" || !run.resultArtifactId) return null;
-  const state = states.get(run.resultArtifactId);
-  if (!state || state.artifact.kind !== "run-output" || !state.artifact.verified || !state.digestMatches) return null;
-  try { return parseJsonl(state, `run ${run.runId} output`); } catch { return null; }
+function posthocCheck(input, states) {
+  if (input.executionStartedAt === null) return check("NO_POSTHOC_INPUT", "PASS", "CHECK_PASSED");
+  const startedAt = Date.parse(input.executionStartedAt);
+  const controls = [...states.values()].filter((state) => CONTROL_ROLES.includes(state.artifact.role));
+  const posthoc = controls.some((state) => Date.parse(state.artifact.availableAt) > startedAt
+    || (state.artifact.provenance && Date.parse(state.artifact.provenance.observedAt) > startedAt));
+  return posthoc
+    ? check("NO_POSTHOC_INPUT", "FAIL", "POSTHOC_INPUT", controls.map((state) => state.artifact.artifactId))
+    : check("NO_POSTHOC_INPUT", "PASS", "CHECK_PASSED", controls.map((state) => state.artifact.artifactId));
 }
 
-function recomputeMetrics(policy, expectedRunIds, expectedCaseIds, recordsByRun, missingPolicy) {
-  const slots = expectedRunIds.flatMap((runId) => expectedCaseIds.map((caseId) => recordsByRun.get(runId)?.get(caseId) ?? null));
-  if (missingPolicy === "reject-incomplete" && slots.some((record) => record === null)) return null;
-  const metrics = {};
-  for (const metric of policy.metrics) {
-    let total = 0;
-    for (const record of slots) {
-      if (!record) continue;
-      const value = record.metrics?.[metric.metricId];
-      if (metric.operation === "rate") {
-        if (value === true || value === 1) total += 1;
-        else if (value !== false && value !== 0) return null;
-      } else {
-        if (typeof value !== "number" || !Number.isFinite(value)) return null;
-        total += value;
+function runCheck(input) {
+  const actual = input.runs.map((run) => run.runId);
+  if (new Set(actual).size !== actual.length) return check("RUN_SET_COMPLETE", "FAIL", "RUN_DUPLICATE");
+  const missing = input.expected.runIds.filter((id) => !actual.includes(id));
+  const unknown = actual.filter((id) => !input.expected.runIds.includes(id));
+  if (missing.length > 0) return check("RUN_SET_COMPLETE", "FAIL", "RUN_MISSING");
+  if (unknown.length > 0) return check("RUN_SET_COMPLETE", "FAIL", "RUN_UNKNOWN");
+  return check("RUN_SET_COMPLETE", "PASS", "CHECK_PASSED", input.runs.map((run) => run.resultArtifactId).filter(Boolean));
+}
+
+function parseResults(input, states) {
+  const records = [];
+  for (const run of input.runs) {
+    if (run.status !== "completed") continue;
+    const state = states.get(run.resultArtifactId);
+    if (!state || state.artifact.role !== "result-records") {
+      return { check: check("RESULT_RECORDS_COMPLETE", "BLOCKED", "ARTIFACT_MISSING", [run.resultArtifactId]), records };
+    }
+    const parsed = parseJsonlState(state, validateResultRecordSchema, "RESULT_SCHEMA_INVALID");
+    if (!parsed.ok) return { check: check("RESULT_RECORDS_COMPLETE", parsed.code === "ARTIFACT_MISSING" ? "BLOCKED" : "FAIL", parsed.code, [state.artifact.artifactId]), records };
+    if (parsed.records.some((record) => record.runId !== run.runId)) {
+      return { check: check("RESULT_RECORDS_COMPLETE", "FAIL", "RESULT_UNKNOWN", [state.artifact.artifactId]), records: [...records, ...parsed.records] };
+    }
+    records.push(...parsed.records);
+  }
+  const keys = records.map((record) => `${record.runId}\u0000${record.caseId}\u0000${record.criterionId}`);
+  if (new Set(keys).size !== keys.length) return { check: check("RESULT_RECORDS_COMPLETE", "FAIL", "RESULT_DUPLICATE", artifactIds(states, ["result-records"])), records };
+  const completedRuns = input.runs.filter((run) => run.status === "completed").map((run) => run.runId);
+  const expectedKeys = completedRuns.flatMap((runId) => input.expected.caseIds.flatMap((caseId) => input.expected.criterionIds.map((criterionId) => `${runId}\u0000${caseId}\u0000${criterionId}`)));
+  if (expectedKeys.some((key) => !keys.includes(key))) return { check: check("RESULT_RECORDS_COMPLETE", "FAIL", "RESULT_MISSING", artifactIds(states, ["result-records"])), records };
+  if (keys.some((key) => !expectedKeys.includes(key))) return { check: check("RESULT_RECORDS_COMPLETE", "FAIL", "RESULT_UNKNOWN", artifactIds(states, ["result-records"])), records };
+  const criteria = new Map(input.criteria.map((criterion) => [criterion.criterionId, criterion]));
+  const artifacts = new Set(states.keys());
+  const invalid = records.some((record) => {
+    const criterion = criteria.get(record.criterionId);
+    const actualMethodAllowed = criterion?.kind === "semantic"
+      ? record.judgmentMethod === "independent-review"
+      : ["deterministic-oracle", "lexical-match"].includes(record.judgmentMethod);
+    return !criterion
+      || !input.actors.judgeIds.includes(record.judgeActorId)
+      || !criterion.judgmentMethods.includes(record.judgmentMethod)
+      || !actualMethodAllowed
+      || record.evidenceRefs.some((ref) => !artifacts.has(ref));
+  });
+  if (invalid) return { check: check("RESULT_RECORDS_COMPLETE", "FAIL", "JUDGMENT_METHOD_MISMATCH", artifactIds(states, ["result-records"])), records };
+  return { check: check("RESULT_RECORDS_COMPLETE", "PASS", "CHECK_PASSED", artifactIds(states, ["result-records"])), records };
+}
+
+function compare(value, comparator, threshold) {
+  if (comparator === ">=") return value >= threshold;
+  if (comparator === ">") return value > threshold;
+  if (comparator === "=") return value === threshold;
+  if (comparator === "<=") return value <= threshold;
+  return value < threshold;
+}
+
+function nearlyEqual(left, right) {
+  return Math.abs(left - right) <= 1e-12 * Math.max(1, Math.abs(left), Math.abs(right));
+}
+
+function recompute(input, records, prerequisitePassed) {
+  if (!prerequisitePassed) return { check: check("AGGREGATE_RECOMPUTED", "FAIL", "AGGREGATION_INVALID"), metrics: [] };
+  const byKey = new Map(records.map((record) => [`${record.runId}\u0000${record.caseId}\u0000${record.criterionId}`, record]));
+  const metrics = [];
+  for (const metric of input.metrics) {
+    const slots = input.expected.runIds.flatMap((runId) => input.expected.caseIds.map((caseId) => byKey.get(`${runId}\u0000${caseId}\u0000${metric.criterionId}`) ?? { outcome: "ERROR", value: null }));
+    const denominator = slots.length;
+    let numerator = 0;
+    if (metric.operation === "rate") numerator = slots.filter((record) => metric.numeratorOutcomes.includes(record.outcome)).length;
+    else {
+      for (const record of slots) {
+        if (record.value === null) continue;
+        if (typeof record.value !== "number" || !Number.isFinite(record.value)) return { check: check("AGGREGATE_RECOMPUTED", "FAIL", "AGGREGATION_INVALID"), metrics: [] };
+        numerator += record.value;
       }
     }
-    metrics[metric.metricId] = metric.operation === "sum" ? total : total / slots.length;
+    const value = metric.operation === "sum" ? numerator : numerator / denominator;
+    metrics.push({
+      metricId: metric.metricId,
+      numerator,
+      denominator,
+      value,
+      comparator: metric.comparator,
+      threshold: metric.threshold,
+      claimedValue: metric.claimedValue,
+      claimMatches: nearlyEqual(value, metric.claimedValue),
+      thresholdPassed: compare(value, metric.comparator, metric.threshold),
+    });
   }
-  return metrics;
+  return { check: check("AGGREGATE_RECOMPUTED", "PASS", "CHECK_PASSED"), metrics };
 }
 
-function postChecks(input, states, pre, expectedCaseIds) {
-  const checks = [];
-  const evidence = (kind) => byKind(states, kind).map((state) => state.artifact.artifactId);
-  const preflightState = oneKind(states, "preflight-report");
-  let preflight = null;
-  try { preflight = parseJson(preflightState, "preflight report"); } catch { preflight = null; }
-  const preflightValid = preflightState?.digestMatches && preflightState.artifact.verified
-    && preflight && validateReportSchema(preflight) && preflight.verdict === "PASS"
-    && preflight.auditPhase === "pre-execution" && sameTarget(preflight, input)
-    && preflight.reportDigest === sha256Canonical(Object.fromEntries(Object.entries(preflight).filter(([key]) => key !== "reportDigest")));
-  checks.push(check("PREFLIGHT_REPORT_BOUND", preflightValid ? "PASS" : preflight ? "FAIL" : "INSUFFICIENT_EVIDENCE", preflightValid ? "CHECK_PASSED" : preflight ? "PREFLIGHT_REPORT_INVALID" : "ARTIFACT_MISSING", evidence("preflight-report")));
-
-  const expectedRuns = input.inventory.expectedRunIds;
-  const actualRunIds = input.runs.map((run) => run.runId);
-  const runDuplicate = new Set(actualRunIds).size !== actualRunIds.length;
-  const runSetComplete = !runDuplicate && canonicalJson([...actualRunIds].sort()) === canonicalJson([...expectedRuns].sort());
-  checks.push(check("RUN_SET_COMPLETE", runSetComplete ? "PASS" : "FAIL", runSetComplete ? "CHECK_PASSED" : runDuplicate ? "RUN_DUPLICATE" : "RUN_SET_INCOMPLETE", input.runs.map((run) => run.resultArtifactId).filter(Boolean)));
-  checks.push(check("FAILURES_PRESERVED", runSetComplete ? "PASS" : "FAIL", runSetComplete ? "CHECK_PASSED" : "FAILURE_OMITTED"));
-
-  const recordsByRun = new Map();
-  let parseComplete = true;
-  let caseComplete = runSetComplete;
-  let observedCaseCount = 0;
-  for (const run of input.runs) {
-    const records = resultRecordsForRun(states, run);
-    if (run.status === "completed" && !records) { parseComplete = false; caseComplete = false; continue; }
-    if (!records) {
-      if (input.inventory.missingResultPolicy === "reject-incomplete") caseComplete = false;
-      recordsByRun.set(run.runId, new Map());
-      continue;
-    }
-    const ids = records.map((record) => record.caseId);
-    const unique = ids.every((id) => typeof id === "string" && id.length > 0) && new Set(ids).size === ids.length;
-    const exact = unique && canonicalJson([...ids].sort()) === canonicalJson([...expectedCaseIds].sort());
-    if (!exact) caseComplete = false;
-    observedCaseCount += records.length;
-    recordsByRun.set(run.runId, new Map(records.map((record) => [record.caseId, record])));
-  }
-  checks.push(check("CASE_SET_COMPLETE", caseComplete ? "PASS" : parseComplete ? "FAIL" : "FAIL", caseComplete ? "CHECK_PASSED" : parseComplete ? "RESULT_SET_INCOMPLETE" : "RESULT_PARSE_FAILED", evidence("run-output")));
-
-  const controlChanged = pre.checks.slice(0, PRE_CHECKS.length).some((item) => ["DIGEST_MISMATCH", "CONTROL_NOT_FROZEN", "FRAME_BINDING_INVALID"].includes(item.code));
-  checks.push(check("NO_POSTHOC_CONTROL_CHANGE", controlChanged ? "FAIL" : "PASS", controlChanged ? "CONTROL_CHANGED" : "CHECK_PASSED", REQUIRED_CONTROL_KINDS.flatMap((kind) => evidence(kind))));
-
-  let metrics = null;
-  let published = null;
-  const policyState = oneKind(states, "aggregation-policy");
-  const aggregateState = oneKind(states, "aggregate-report");
-  try {
-    const policy = parseJson(policyState, "aggregation policy");
-    metrics = caseComplete && parseComplete ? recomputeMetrics(policy, expectedRuns, expectedCaseIds, recordsByRun, input.inventory.missingResultPolicy) : null;
-  } catch { metrics = null; }
-  checks.push(check("AGGREGATE_RECOMPUTED", metrics ? "PASS" : "FAIL", metrics ? "CHECK_PASSED" : "AGGREGATION_INVALID", [...evidence("aggregation-policy"), ...evidence("run-output")]));
-  try {
-    const aggregate = parseJson(aggregateState, "aggregate report");
-    if (aggregateState.digestMatches && aggregateState.artifact.verified && aggregate.evaluationId === input.target.evaluationId
-      && aggregate.frameDigest === input.target.frameDigest && aggregate.metrics && typeof aggregate.metrics === "object") published = aggregate.metrics;
-  } catch { published = null; }
-  const metricsMatch = metrics && published && canonicalJson(metrics) === canonicalJson(published);
-  checks.push(check("PUBLISHED_METRICS_MATCH", metricsMatch ? "PASS" : published ? "FAIL" : "INSUFFICIENT_EVIDENCE", metricsMatch ? "CHECK_PASSED" : published ? "PUBLISHED_METRICS_MISMATCH" : "ARTIFACT_MISSING", evidence("aggregate-report")));
-  return { checks, observedCaseCount, metrics: metrics ?? {}, published };
+function claimCheck(input, states, metrics) {
+  const state = oneRole(states, "aggregate-claim");
+  if (!state?.exists) return check("CLAIM_MATCHES", "BLOCKED", "AGGREGATE_CLAIM_MISSING");
+  const parsed = parseJsonState(state, validateAggregateClaimSchema);
+  if (!parsed.ok) return check("CLAIM_MATCHES", "FAIL", "AGGREGATE_CLAIM_INVALID", [state.artifact.artifactId]);
+  const claim = parsed.value;
+  if (claim.evaluationId !== input.target.evaluationId || claim.targetDigest !== input.target.digest) return check("CLAIM_MATCHES", "FAIL", "AGGREGATE_MISMATCH", [state.artifact.artifactId]);
+  const claimedById = new Map(claim.metrics.map((metric) => [metric.metricId, metric]));
+  const matches = claim.metrics.length === metrics.length && metrics.every((metric) => {
+    const claimed = claimedById.get(metric.metricId);
+    return claimed
+      && nearlyEqual(claimed.numerator, metric.numerator)
+      && claimed.denominator === metric.denominator
+      && nearlyEqual(claimed.value, metric.value)
+      && claimed.comparator === metric.comparator
+      && nearlyEqual(claimed.threshold, metric.threshold)
+      && claimed.passed === metric.thresholdPassed
+      && metric.claimMatches;
+  });
+  return check("CLAIM_MATCHES", matches ? "PASS" : "FAIL", matches ? "CHECK_PASSED" : "AGGREGATE_MISMATCH", [state.artifact.artifactId]);
 }
 
 function verdictFor(checks) {
   if (checks.some((item) => item.status === "FAIL")) return "FAIL";
-  if (checks.some((item) => item.status === "NEEDS_INPUT")) return "NEEDS_INPUT";
-  if (checks.some((item) => item.status === "INSUFFICIENT_EVIDENCE")) return "BLOCKED";
+  if (checks.some((item) => item.status === "BLOCKED")) return "BLOCKED";
   return "PASS";
 }
 
-export async function analyzeEvaluation(input) {
+function bindings(input) {
+  return input.artifacts.map(({ artifactId, role, digest }) => ({ artifactId, role, digest })).sort((left, right) => left.artifactId.localeCompare(right.artifactId));
+}
+
+function evidenceIndex(states) {
+  return [...states.values()]
+    .filter((state) => state.exists && state.digestMatches)
+    .map((state) => ({ artifactId: state.artifact.artifactId, role: state.artifact.role, digest: state.artifact.digest }))
+    .sort((left, right) => left.artifactId.localeCompare(right.artifactId));
+}
+
+export async function analyzeEvaluation(input, options = {}) {
   if (!input || typeof input !== "object" || Array.isArray(input) || !validateRequestSchema(input)) {
-    throw new InputError("EvaluationAuditRequest.v1 validation failed.", { errors: structuredClone(validateRequestSchema?.errors ?? []) });
+    throw new InputError("EvaluationValidityRequest.v1 validation failed.", { errors: structuredClone(validateRequestSchema?.errors ?? []) });
   }
-  const { states } = await inspectArtifacts(input);
-  const pre = structuralPreChecks(input, states);
-  let checks = pre.checks;
-  let observedCaseCount = pre.manifest?.records.length ?? 0;
-  let metrics = {};
-  let published = null;
-  if (input.auditPhase === "pre-execution") {
-    if (input.runs.length !== 0) throw new InputError("pre-execution requests must not contain runs.");
-  } else {
-    const expectedCaseIds = pre.manifest?.ids?.filter((id) => typeof id === "string") ?? [];
-    const post = postChecks(input, states, pre, expectedCaseIds);
-    checks = [...checks, ...post.checks];
-    observedCaseCount = post.observedCaseCount;
-    metrics = post.metrics;
-    published = post.published;
+  const states = await inspectArtifacts(input, options.artifactRoot);
+  const caseManifest = parseCaseManifest(input, states);
+  const checks = [
+    artifactIntegrityCheck(input, states),
+    frameCheck(input),
+    caseManifest.check,
+    roleCheck(input),
+    methodCheck(input, states),
+    aggregationRuleCheck(input, states),
+    provenanceCheck(states),
+    posthocCheck(input, states),
+  ];
+  let records = [];
+  let metrics = [];
+  if (input.auditStage === "post-execution") {
+    const run = runCheck(input);
+    const result = parseResults(input, states);
+    checks.push(run, result.check);
+    records = result.records;
+    const aggregate = recompute(input, records, run.status === "PASS" && result.check.status === "PASS" && caseManifest.check.status === "PASS");
+    metrics = aggregate.metrics;
+    checks.push(aggregate.check, claimCheck(input, states, metrics));
   }
   const verdict = verdictFor(checks);
-  const blockingCodes = [...new Set(checks.filter((item) => item.status !== "PASS").map((item) => item.code))];
+  const expectedResults = input.expected.caseIds.length * input.expected.runIds.length * input.expected.criterionIds.length;
   const report = {
     schemaVersion: "1.0.0",
     auditId: input.auditId,
-    auditPhase: input.auditPhase,
+    auditStage: input.auditStage,
     auditedAt: input.auditedAt,
     auditorActorId: input.actors.auditorId,
-    target: reportTarget(input),
+    requestDigest: sha256Canonical(input),
+    target: structuredClone(input.target),
+    artifactBindings: bindings(input),
     checks,
-    inventory: {
-      expectedCaseCount: input.inventory.expectedCaseCount,
-      observedCaseCount,
-      expectedRunCount: input.inventory.expectedRunIds.length,
-      observedRunCount: input.runs.length,
-      splitCounts: pre.manifest?.splitCounts ?? {},
+    coverage: {
+      expectedCases: input.expected.caseIds.length,
+      observedCases: caseManifest.records.length,
+      expectedRuns: input.expected.runIds.length,
+      observedRuns: input.runs.length,
+      expectedResults,
+      observedResults: records.length,
     },
     recomputedMetrics: metrics,
-    recomputedMetricsDigest: input.auditPhase === "post-execution" && Object.keys(metrics).length > 0 ? sha256Canonical(metrics) : null,
-    publishedMetricsDigest: input.auditPhase === "post-execution" && published ? sha256Canonical(published) : null,
-    verifiedEvidenceIndex: currentEvidence(states),
-    blockingCodes,
-    limitations: [...new Set([...input.knownLimitations, "CALLER_TRUSTED_ACTOR_IDENTITIES", "JSON_JSONL_ONLY_V1"])],
+    verifiedEvidenceIndex: evidenceIndex(states),
+    blockingCodes: [...new Set(checks.filter((item) => item.status !== "PASS").map((item) => item.code))].sort(),
+    limitations: [...new Set([...input.knownLimitations, "COOPERATIVE_PROVENANCE_ASSERTIONS", "JSON_JSONL_ONLY_V1"])].sort(),
+    qualifiesAsQualityOrReleaseEvidence: input.auditStage === "post-execution" && verdict === "PASS",
     verdict,
   };
   const complete = { ...report, reportDigest: sha256Canonical(report) };
@@ -457,19 +433,17 @@ export async function analyzeEvaluation(input) {
   return complete;
 }
 
-export async function validateReport(validation) {
+export async function validateReport(validation, options = {}) {
+  if (!validateValidationSchema(validation)) return [`validation envelope schema validation failed: ${JSON.stringify(validateValidationSchema.errors)}`];
   const errors = [];
-  if (!validateValidationSchema(validation)) {
-    return [`validation envelope schema validation failed: ${JSON.stringify(validateValidationSchema.errors)}`];
-  }
-  const expectedRequestDigest = sha256Canonical(validation.request);
-  if (validation.requestArtifact.digest !== expectedRequestDigest) errors.push("requestArtifact.digest does not match the canonical frozen request");
-  const reportPayload = { ...validation.report };
-  delete reportPayload.reportDigest;
-  if (validation.report.reportDigest !== sha256Canonical(reportPayload)) errors.push("reportDigest does not match the canonical report");
-  if (!validateReportSchema(validation.report)) errors.push(`report schema validation failed: ${JSON.stringify(validateReportSchema.errors)}`);
+  const requestDigest = sha256Canonical(validation.request);
+  if (validation.requestArtifact.digest !== requestDigest) errors.push("requestArtifact.digest does not match the canonical frozen request");
+  if (validation.report.requestDigest !== requestDigest) errors.push("report.requestDigest does not match the canonical frozen request");
+  const payload = { ...validation.report };
+  delete payload.reportDigest;
+  if (validation.report.reportDigest !== sha256Canonical(payload)) errors.push("reportDigest does not match the canonical report");
   try {
-    const expected = await analyzeEvaluation(validation.request);
+    const expected = await analyzeEvaluation(validation.request, options);
     if (canonicalJson(expected) !== canonicalJson(validation.report)) errors.push("report does not match the current request and artifact evidence");
   } catch (error) {
     errors.push(`request cannot substantiate report: ${error instanceof Error ? error.message : String(error)}`);
@@ -477,16 +451,15 @@ export async function validateReport(validation) {
   return errors;
 }
 
-export function summarizeReport(report) {
+export function digestRequest(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input) || !validateRequestSchema(input)) {
+    throw new InputError("EvaluationValidityRequest.v1 validation failed.", { errors: structuredClone(validateRequestSchema?.errors ?? []) });
+  }
   return {
     schemaVersion: "1.0.0",
-    auditPhase: report.auditPhase,
-    auditorActorId: report.auditorActorId,
-    targetDigest: report.target.frameDigest,
-    reportDigest: report.reportDigest,
-    verdict: report.verdict,
-    blockingCodes: report.blockingCodes,
+    artifactId: "evaluation-validity-request",
+    digest: sha256Canonical(input),
   };
 }
 
-export const REQUIRED_CHECKS = { pre: PRE_CHECKS, post: [...PRE_CHECKS, ...POST_CHECKS] };
+export const REQUIRED_CHECKS = { pre: PRE_CHECK_IDS, post: [...PRE_CHECK_IDS, ...POST_CHECK_IDS] };

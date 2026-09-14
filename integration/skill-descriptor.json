@@ -5,76 +5,35 @@
       "skillId": "evaluation-validity-auditor",
       "version": "1.0.0",
       "enabled": true,
-      "capabilities": ["evaluation-validity-preflight"],
+      "capabilities": ["evaluation-validity-audit"],
       "priority": 50,
       "executionClass": "workflow",
-      "phase": "evaluation-validity-preflight",
-      "phaseOrder": 30,
-      "requiredInputArtifacts": ["evaluation-audit-request", "evaluation-frame", "evaluation-corpus-manifest", "evaluation-rubric", "evaluation-oracle", "evaluation-aggregation-policy", "evaluation-thresholds"],
+      "phase": "evaluation-validity",
+      "phaseOrder": 68,
+      "requiredInputArtifacts": ["evaluation-validity-request", "frozen-evaluation-frame", "evaluation-evidence"],
       "inputBindings": [
-        { "targetArtifact": "evaluation-audit-request", "sources": ["workflow:evaluation-audit-request"], "operation": "require-external" },
-        { "targetArtifact": "evaluation-frame", "sources": ["workflow:evaluation-frame"], "operation": "require-external" },
-        { "targetArtifact": "evaluation-corpus-manifest", "sources": ["workflow:evaluation-corpus-manifest"], "operation": "require-external" },
-        { "targetArtifact": "evaluation-rubric", "sources": ["workflow:evaluation-rubric"], "operation": "require-external" },
-        { "targetArtifact": "evaluation-oracle", "sources": ["workflow:evaluation-oracle"], "operation": "require-external" },
-        { "targetArtifact": "evaluation-aggregation-policy", "sources": ["workflow:evaluation-aggregation-policy"], "operation": "require-external" },
-        { "targetArtifact": "evaluation-thresholds", "sources": ["workflow:evaluation-thresholds"], "operation": "require-external" }
-      ],
-      "producedArtifacts": ["evaluation-validity-preflight-report", "verified-evaluation-evidence-index"],
-      "outputSchema": "integration/evaluation-provider-summary.v1.schema.json",
-      "resultSchema": "integration/provider-result.v1.schema.json",
-      "stateMapping": {
-        "selector": "/output/verdict",
-        "values": {
-          "PASS": { "state": "passed", "errorRequired": false },
-          "NEEDS_INPUT": { "state": "needs-input", "errorRequired": false },
-          "FAIL": { "state": "failed", "errorRequired": true, "allowedErrorCodes": ["GATE_FAILED", "INTEGRITY_FAILED"] },
-          "BLOCKED": { "state": "blocked", "errorRequired": true, "allowedErrorCodes": ["MISSING_EVIDENCE"] }
-        },
-        "default": "reject",
-        "adapterErrors": ["INVALID_INPUT", "MISSING_EVIDENCE"]
-      },
-      "selectionCriteria": ["evaluation-execution-requested", "evaluation-result-will-support-quality-or-release-claim"],
-      "preconditions": ["A frozen evaluation frame, current artifact references, role assignments, and an independent auditor are available before execution."],
-      "failureHandling": { "missingInput": "blocked", "invalidEvaluation": "failed", "retry": "new-or-corrected-evidence-only" },
-      "gate": { "kind": "precondition", "policy": "conditional", "validator": "evaluation-validity-preflight" },
-      "receiptPolicy": { "mode": "reference-only" }
-    },
-    {
-      "skillId": "evaluation-validity-auditor",
-      "version": "1.0.0",
-      "enabled": true,
-      "capabilities": ["evaluation-result-validity-audit"],
-      "priority": 50,
-      "executionClass": "workflow",
-      "phase": "evaluation-result-validity-audit",
-      "phaseOrder": 65,
-      "requiredInputArtifacts": ["evaluation-audit-request", "evaluation-validity-preflight-report", "evaluation-run-evidence", "evaluation-aggregate-report"],
-      "inputBindings": [
-        { "targetArtifact": "evaluation-audit-request", "sources": ["workflow:evaluation-audit-request"], "operation": "require-external" },
-        { "targetArtifact": "evaluation-validity-preflight-report", "sources": ["evaluation-validity-preflight-report"], "operation": "select" },
-        { "targetArtifact": "evaluation-run-evidence", "sources": ["workflow:evaluation-run-evidence"], "operation": "collect" },
-        { "targetArtifact": "evaluation-aggregate-report", "sources": ["workflow:evaluation-aggregate-report"], "operation": "require-external" }
+        { "targetArtifact": "evaluation-validity-request", "sources": ["workflow:evaluation-validity-request"], "operation": "require-external" },
+        { "targetArtifact": "frozen-evaluation-frame", "sources": ["workflow:frozen-evaluation-frame"], "operation": "require-external" },
+        { "targetArtifact": "evaluation-evidence", "sources": ["workflow:evaluation-evidence"], "operation": "collect" }
       ],
       "producedArtifacts": ["evaluation-validity-report", "verified-evaluation-evidence-index"],
-      "outputSchema": "integration/evaluation-provider-summary.v1.schema.json",
+      "outputSchema": "contracts/evaluation-validity-report.v1.schema.json",
       "resultSchema": "integration/provider-result.v1.schema.json",
       "stateMapping": {
         "selector": "/output/verdict",
         "values": {
           "PASS": { "state": "passed", "errorRequired": false },
-          "NEEDS_INPUT": { "state": "needs-input", "errorRequired": false },
-          "FAIL": { "state": "failed", "errorRequired": true, "allowedErrorCodes": ["GATE_FAILED", "INTEGRITY_FAILED"] },
+          "FAIL": { "state": "failed", "errorRequired": true, "allowedErrorCodes": ["GATE_FAILED"] },
           "BLOCKED": { "state": "blocked", "errorRequired": true, "allowedErrorCodes": ["MISSING_EVIDENCE"] }
         },
         "default": "reject",
         "adapterErrors": ["INVALID_INPUT", "MISSING_EVIDENCE"]
       },
-      "selectionCriteria": ["evaluation-result-supports-completion-claim", "evaluation-result-supports-activation-or-release"],
-      "preconditions": ["A passing pre-execution validity report and the complete frozen run evidence are available for the same target."],
+      "selectionCriteria": ["explicit-evaluation-validity-audit", "evaluation-result-used-as-quality-or-release-evidence"],
+      "preconditions": ["A frozen evaluation request and inspectable evidence rooted in one explicit artifact directory are available."],
       "failureHandling": { "missingInput": "blocked", "invalidEvaluation": "failed", "retry": "new-or-corrected-evidence-only" },
-      "gate": { "kind": "completion", "policy": "conditional", "validator": "evaluation-result-validity" },
-      "receiptPolicy": { "mode": "reference-only" }
+      "gate": { "kind": "completion", "policy": "conditional", "validator": "contracts/evaluation-validity-report.v1.schema.json" },
+      "receiptPolicy": { "mode": "reference-only", "actorIdPointer": "/output/auditorActorId", "uniqueness": "run" }
     }
   ]
 }

@@ -38,7 +38,7 @@ try {
       return ![".git", "node_modules", "runtime", "test"].includes(first);
     },
   });
-  await execute(process.execPath, ["--input-type=module", "--eval", "await import('./scripts/core.mjs'); await import('./integration/adapters/korean-prose.mjs');"], {
+  await execute(process.execPath, ["--input-type=module", "--eval", "await import('./scripts/core.mjs');"], {
     cwd: installedSkill,
     encoding: "utf8",
     maxBuffer: 10 * 1024 * 1024,

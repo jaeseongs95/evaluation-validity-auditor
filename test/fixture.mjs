@@ -3,102 +3,107 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { analyzeEvaluation, sha256Canonical } from "../scripts/core.mjs";
-
 const actor = {
   author: "11111111-1111-4111-8111-111111111111",
-  auditor: "22222222-2222-4222-8222-222222222222",
-  evaluator: "33333333-3333-4333-8333-333333333333",
-  adjudicator: "44444444-4444-4444-8444-444444444444",
+  executor: "22222222-2222-4222-8222-222222222222",
+  judge: "33333333-3333-4333-8333-333333333333",
+  auditor: "44444444-4444-4444-8444-444444444444",
 };
 
-const rawDigest = (value) => `sha256:${createHash("sha256").update(value).digest("hex")}`;
+export const rawDigest = (value) => `sha256:${createHash("sha256").update(value).digest("hex")}`;
 
 export async function makeFixture() {
   const root = await mkdtemp(path.join(os.tmpdir(), "evaluation-validity-auditor-"));
   const contents = new Map([
-    ["manifest", '{"caseId":"case-1","split":"legacy"}\n{"caseId":"case-2","split":"holdout"}\n'],
-    ["labels", '{"caseId":"case-1","label":true}\n{"caseId":"case-2","label":false}\n'],
-    ["rubric", JSON.stringify({ schemaVersion: "1.0.0", dimensions: ["correctness"] })],
-    ["oracle", JSON.stringify({ schemaVersion: "1.0.0", kind: "semantic-adjudication" })],
-    ["aggregation", JSON.stringify({ schemaVersion: "1.0.0", denominator: "all-expected-results", metrics: [{ metricId: "passRate", operation: "rate" }, { metricId: "quality", operation: "mean" }] })],
-    ["thresholds", JSON.stringify({ schemaVersion: "1.0.0", passRate: 0.5 })],
+    ["manifest", '{"schemaVersion":"1.0.0","caseId":"case-1","split":"validation"}\n{"schemaVersion":"1.0.0","caseId":"case-2","split":"holdout"}\n'],
+    ["rubric", JSON.stringify({ schemaVersion: "1.0.0", criteria: ["semantic-quality", "exact-output"] })],
+    ["oracle", JSON.stringify({ schemaVersion: "1.0.0", kinds: ["independent-review", "lexical-match"] })],
+    ["aggregation", JSON.stringify({ schemaVersion: "1.0.0", denominator: "all-expected-records", metricIds: ["semantic-pass-rate", "exact-pass-rate"] })],
+    ["timing", JSON.stringify({ schemaVersion: "1.0.0", receipt: "frozen-before-execution" })],
     ["evidence", JSON.stringify({ schemaVersion: "1.0.0", source: "independent-review" })],
   ]);
   const filenames = {
-    manifest: "corpus.jsonl",
-    labels: "labels.jsonl",
+    manifest: "fixture-manifest.jsonl",
     rubric: "rubric.json",
     oracle: "oracle.json",
     aggregation: "aggregation.json",
-    thresholds: "thresholds.json",
+    timing: "timing.json",
     evidence: "evidence.json",
   };
   for (const [id, value] of contents) await writeFile(path.join(root, filenames[id]), value, "utf8");
-
   const digest = Object.fromEntries([...contents].map(([id, value]) => [id, rawDigest(value)]));
-  const candidateDigest = rawDigest("candidate-v1");
-  const controlArtifacts = [
-    artifact("manifest", "corpus-manifest", filenames.manifest, digest.manifest, "jsonl", "pre-execution", ["author", "auditor", "evaluator"]),
-    artifact("labels", "labels", filenames.labels, digest.labels, "jsonl", "post-execution", ["auditor", "adjudicator"]),
-    artifact("rubric", "rubric", filenames.rubric, digest.rubric, "json", "pre-execution", ["author", "auditor", "evaluator", "adjudicator"]),
-    artifact("oracle", "oracle", filenames.oracle, digest.oracle, "json", "pre-execution", ["auditor", "adjudicator"]),
-    artifact("aggregation", "aggregation-policy", filenames.aggregation, digest.aggregation, "json", "pre-execution", ["author", "auditor", "evaluator"]),
-    artifact("thresholds", "thresholds", filenames.thresholds, digest.thresholds, "json", "pre-execution", ["author", "auditor"]),
-  ];
-  const frameValue = {
-    schemaVersion: "1.0.0",
-    evaluationId: "eval-1",
-    candidateDigest,
-    corpusDigest: digest.manifest,
-    runBudget: 2,
-    artifactDigests: Object.fromEntries(controlArtifacts.map((item) => [item.artifactId, item.digest])),
-  };
-  const frameText = JSON.stringify(frameValue);
-  await writeFile(path.join(root, "frame.json"), frameText, "utf8");
-  digest.frame = rawDigest(frameText);
   const artifacts = [
-    artifact("frame", "frame", "frame.json", digest.frame, "json", "pre-execution", ["author", "auditor", "evaluator"]),
-    ...controlArtifacts,
-    artifact("independent-evidence", "evidence", filenames.evidence, digest.evidence, "json", "pre-execution", ["auditor"]),
+    artifact("fixture-manifest", "fixture-manifest", filenames.manifest, digest.manifest, "jsonl", ["author", "executor", "judge", "auditor"]),
+    artifact("rubric", "rubric", filenames.rubric, digest.rubric, "json", ["author", "executor", "judge", "auditor"]),
+    artifact("oracle", "oracle", filenames.oracle, digest.oracle, "json", ["judge", "auditor"]),
+    artifact("aggregation-rule", "aggregation-rule", filenames.aggregation, digest.aggregation, "json", ["author", "auditor"]),
+    artifact("timing-evidence", "timing-evidence", filenames.timing, digest.timing, "json", ["auditor"]),
+    artifact("independent-evidence", "evidence", filenames.evidence, digest.evidence, "json", ["judge", "auditor"]),
   ];
   const base = {
     schemaVersion: "1.0.0",
     auditId: "audit-pre-1",
-    auditPhase: "pre-execution",
+    auditStage: "pre-execution",
     auditedAt: "2026-01-01T00:00:00Z",
-    auditRoot: root,
     target: {
       evaluationId: "eval-1",
-      frameDigest: digest.frame,
-      candidateDigest,
-      corpusDigest: digest.manifest,
+      identifier: "candidate-1",
       revision: "revision-1",
-      frameCreatedAt: "2025-12-31T23:00:00Z",
-      executionStartedAt: "2026-01-02T00:00:00Z",
+      digest: rawDigest("candidate-v1"),
     },
+    frozenAt: "2025-12-31T22:00:00Z",
+    executionStartedAt: "2026-01-02T00:00:00Z",
     actors: {
       authorIds: [actor.author],
+      executorIds: [actor.executor],
+      judgeIds: [actor.judge],
       auditorId: actor.auditor,
-      evaluatorIds: [actor.evaluator],
-      adjudicatorIds: [actor.adjudicator],
     },
     artifacts,
-    inventory: {
-      manifestArtifactId: "manifest",
-      caseIdField: "caseId",
-      splitField: "split",
-      splitPolicy: "disjoint",
-      expectedCaseCount: 2,
-      expectedCaseIdsDigest: sha256Canonical(["case-1", "case-2"]),
-      expectedRunIds: ["run-1", "run-2"],
-      missingResultPolicy: "include-as-failure",
+    expected: {
+      caseIds: ["case-1", "case-2"],
+      runIds: ["run-1", "run-2"],
+      criterionIds: ["semantic-quality", "exact-output"],
     },
-    runs: [],
-    semanticJudgments: [
-      { checkId: "ORACLE_FIT", status: "PASS", auditorActorId: actor.auditor, evidenceRefs: ["oracle"], code: "SEMANTIC_ORACLE_SUPPORTED" },
-      { checkId: "NON_SELF_REPORTED_EVIDENCE", status: "PASS", auditorActorId: actor.auditor, evidenceRefs: ["independent-evidence"], code: "INDEPENDENT_EVIDENCE_PRESENT" },
+    criteria: [
+      {
+        criterionId: "semantic-quality",
+        kind: "semantic",
+        judgmentMethods: ["independent-review", "self-report"],
+        oracleArtifactId: "oracle",
+        evidenceRefs: ["independent-evidence"],
+      },
+      {
+        criterionId: "exact-output",
+        kind: "deterministic",
+        judgmentMethods: ["lexical-match"],
+        oracleArtifactId: "oracle",
+        evidenceRefs: ["oracle"],
+      },
     ],
+    metrics: [
+      {
+        metricId: "semantic-pass-rate",
+        criterionId: "semantic-quality",
+        operation: "rate",
+        denominator: "all-expected-records",
+        numeratorOutcomes: ["PASS"],
+        comparator: ">=",
+        threshold: 0.25,
+        claimedValue: null,
+      },
+      {
+        metricId: "exact-pass-rate",
+        criterionId: "exact-output",
+        operation: "rate",
+        denominator: "all-expected-records",
+        numeratorOutcomes: ["PASS"],
+        comparator: ">=",
+        threshold: 0.5,
+        claimedValue: null,
+      },
+    ],
+    runs: [],
     knownLimitations: [],
   };
   return { root, base, digest, actor };
@@ -106,30 +111,64 @@ export async function makeFixture() {
 
 export async function makePostFixture() {
   const fixture = await makeFixture();
-  const preReport = await analyzeEvaluation(fixture.base);
-  const preflightText = JSON.stringify(preReport);
-  const runText = '{"caseId":"case-1","metrics":{"passRate":true,"quality":0.8}}\n{"caseId":"case-2","metrics":{"passRate":false,"quality":0.6}}\n';
-  const metrics = { passRate: 0.25, quality: 0.35 };
-  const aggregateText = JSON.stringify({ evaluationId: "eval-1", frameDigest: fixture.digest.frame, metrics });
-  await writeFile(path.join(fixture.root, "preflight.json"), preflightText, "utf8");
-  await writeFile(path.join(fixture.root, "run-1.jsonl"), runText, "utf8");
+  const resultRecords = [
+    result("case-1", "run-1", "semantic-quality", "PASS", fixture.actor.judge, "independent-review", "independent-evidence"),
+    result("case-1", "run-1", "exact-output", "PASS", fixture.actor.judge, "lexical-match", "oracle"),
+    result("case-2", "run-1", "semantic-quality", "FAIL", fixture.actor.judge, "independent-review", "independent-evidence"),
+    result("case-2", "run-1", "exact-output", "PASS", fixture.actor.judge, "lexical-match", "oracle"),
+  ];
+  const resultText = `${resultRecords.map((record) => JSON.stringify(record)).join("\n")}\n`;
+  const metrics = [
+    { metricId: "semantic-pass-rate", numerator: 1, denominator: 4, value: 0.25, comparator: ">=", threshold: 0.25, passed: true },
+    { metricId: "exact-pass-rate", numerator: 2, denominator: 4, value: 0.5, comparator: ">=", threshold: 0.5, passed: true },
+  ];
+  const aggregateText = JSON.stringify({ schemaVersion: "1.0.0", evaluationId: "eval-1", targetDigest: fixture.base.target.digest, metrics });
+  await writeFile(path.join(fixture.root, "run-1.jsonl"), resultText, "utf8");
   await writeFile(path.join(fixture.root, "aggregate.json"), aggregateText, "utf8");
   const post = structuredClone(fixture.base);
   post.auditId = "audit-post-1";
-  post.auditPhase = "post-execution";
+  post.auditStage = "post-execution";
   post.auditedAt = "2026-01-03T00:00:00Z";
+  post.metrics[0].claimedValue = 0.25;
+  post.metrics[1].claimedValue = 0.5;
   post.artifacts.push(
-    artifact("preflight", "preflight-report", "preflight.json", rawDigest(preflightText), "json", "pre-execution", ["auditor"]),
-    artifact("run-1-output", "run-output", "run-1.jsonl", rawDigest(runText), "jsonl", "post-execution", ["auditor", "adjudicator"]),
-    artifact("aggregate-report", "aggregate-report", "aggregate.json", rawDigest(aggregateText), "json", "post-execution", ["auditor", "adjudicator"]),
+    artifact("run-1-results", "result-records", "run-1.jsonl", rawDigest(resultText), "jsonl", ["judge", "auditor"], "2026-01-02T01:00:00Z"),
+    artifact("aggregate-claim", "aggregate-claim", "aggregate.json", rawDigest(aggregateText), "json", ["auditor"], "2026-01-02T02:00:00Z"),
   );
   post.runs = [
-    { runId: "run-1", status: "completed", resultArtifactId: "run-1-output" },
+    { runId: "run-1", status: "completed", resultArtifactId: "run-1-results" },
     { runId: "run-2", status: "failed", resultArtifactId: null },
   ];
-  return { ...fixture, post, preReport, metrics };
+  return { ...fixture, post, metrics, resultText, aggregateText };
 }
 
-function artifact(artifactId, kind, locator, digest, format, availability, visibleToRoles) {
-  return { artifactId, kind, locator, digest, format, availability, visibleToRoles, verified: true };
+function artifact(artifactId, role, locator, digest, mediaType, visibleToRoles, availableAt = "2025-12-31T20:00:00Z") {
+  return {
+    artifactId,
+    role,
+    locator,
+    digest,
+    mediaType,
+    availableAt,
+    visibleToRoles,
+    provenance: {
+      source: "trusted-system",
+      observedAt: availableAt,
+      evidenceRefs: [`receipt:${artifactId}`],
+    },
+  };
+}
+
+function result(caseId, runId, criterionId, outcome, judgeActorId, judgmentMethod, evidenceRef) {
+  return {
+    schemaVersion: "1.0.0",
+    caseId,
+    runId,
+    criterionId,
+    outcome,
+    value: null,
+    judgeActorId,
+    judgmentMethod,
+    evidenceRefs: [evidenceRef],
+  };
 }
