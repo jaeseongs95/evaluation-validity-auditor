@@ -8,7 +8,7 @@
   "properties": {
     "schemaVersion": { "const": "1.0.0" },
     "kind": { "enum": ["output", "adapter-error"] },
-    "output": { "oneOf": [{ "type": "null" }, { "$ref": "./evaluation-provider-summary.v1.schema.json" }] },
+    "output": { "oneOf": [{ "type": "null" }, { "$ref": "../contracts/evaluation-validity-report.v1.schema.json" }] },
     "artifacts": {
       "type": "array",
       "items": {
@@ -16,7 +16,7 @@
         "additionalProperties": false,
         "required": ["artifactId", "schemaId", "locator", "digest", "targetDigest", "verified"],
         "properties": {
-          "artifactId": { "enum": ["evaluation-validity-preflight-report", "evaluation-validity-report", "verified-evaluation-evidence-index"] },
+          "artifactId": { "enum": ["evaluation-validity-report", "verified-evaluation-evidence-index"] },
           "schemaId": { "type": "string", "minLength": 1 },
           "locator": { "type": "string", "minLength": 1 },
           "digest": { "type": "string", "pattern": "^(?:sha256:)?[a-f0-9]{64}$" },
@@ -33,7 +33,7 @@
           "additionalProperties": false,
           "required": ["code", "message", "details"],
           "properties": {
-            "code": { "enum": ["INVALID_INPUT", "MISSING_EVIDENCE", "GATE_FAILED", "INTEGRITY_FAILED"] },
+            "code": { "enum": ["INVALID_INPUT", "MISSING_EVIDENCE", "GATE_FAILED"] },
             "message": { "type": "string", "minLength": 1 },
             "details": { "type": ["object", "null"], "additionalProperties": true }
           }

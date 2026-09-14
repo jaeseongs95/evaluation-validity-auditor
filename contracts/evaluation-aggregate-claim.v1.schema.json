@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://evaluation-validity-auditor.local/contracts/evaluation-aggregate-claim.v1.schema.json",
+  "title": "EvaluationAggregateClaim.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "evaluationId", "targetDigest", "metrics"],
+  "properties": {
+    "schemaVersion": { "const": "1.0.0" },
+    "evaluationId": { "$ref": "#/$defs/token" },
+    "targetDigest": { "$ref": "#/$defs/digest" },
+    "metrics": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["metricId", "numerator", "denominator", "value", "comparator", "threshold", "passed"],
+        "properties": {
+          "metricId": { "$ref": "#/$defs/token" },
+          "numerator": { "type": "number" },
+          "denominator": { "type": "integer", "minimum": 1 },
+          "value": { "type": "number" },
+          "comparator": { "enum": [">=", ">", "=", "<=", "<"] },
+          "threshold": { "type": "number" },
+          "passed": { "type": "boolean" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "token": { "type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$" },
+    "digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
+  }
+}

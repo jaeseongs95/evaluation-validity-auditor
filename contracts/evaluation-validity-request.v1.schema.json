@@ -1,0 +1,185 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://evaluation-validity-auditor.local/contracts/evaluation-validity-request.v1.schema.json",
+  "title": "EvaluationValidityRequest.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "auditId", "auditStage", "auditedAt", "target", "frozenAt", "executionStartedAt", "actors", "artifacts", "expected", "criteria", "metrics", "runs", "knownLimitations"],
+  "properties": {
+    "schemaVersion": { "const": "1.0.0" },
+    "auditId": { "$ref": "#/$defs/token" },
+    "auditStage": { "enum": ["pre-execution", "post-execution"] },
+    "auditedAt": { "type": "string", "format": "date-time" },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evaluationId", "identifier", "revision", "digest"],
+      "properties": {
+        "evaluationId": { "$ref": "#/$defs/token" },
+        "identifier": { "$ref": "#/$defs/token" },
+        "revision": { "type": "string", "minLength": 1 },
+        "digest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "frozenAt": { "type": "string", "format": "date-time" },
+    "executionStartedAt": { "type": ["string", "null"], "format": "date-time" },
+    "actors": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["authorIds", "executorIds", "judgeIds", "auditorId"],
+      "properties": {
+        "authorIds": { "$ref": "#/$defs/actorArray" },
+        "executorIds": { "$ref": "#/$defs/actorArray" },
+        "judgeIds": { "$ref": "#/$defs/actorArray" },
+        "auditorId": { "$ref": "#/$defs/uuid" }
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 5,
+      "items": { "$ref": "#/$defs/artifact" }
+    },
+    "expected": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["caseIds", "runIds", "criterionIds"],
+      "properties": {
+        "caseIds": { "$ref": "#/$defs/tokenArray" },
+        "runIds": { "$ref": "#/$defs/tokenArray" },
+        "criterionIds": { "$ref": "#/$defs/tokenArray" }
+      }
+    },
+    "criteria": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["criterionId", "kind", "judgmentMethods", "oracleArtifactId", "evidenceRefs"],
+        "properties": {
+          "criterionId": { "$ref": "#/$defs/token" },
+          "kind": { "enum": ["deterministic", "semantic"] },
+          "judgmentMethods": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": { "$ref": "#/$defs/judgmentMethod" }
+          },
+          "oracleArtifactId": { "oneOf": [{ "$ref": "#/$defs/token" }, { "type": "null" }] },
+          "evidenceRefs": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/token" } }
+        }
+      }
+    },
+    "metrics": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["metricId", "criterionId", "operation", "denominator", "numeratorOutcomes", "comparator", "threshold", "claimedValue"],
+        "properties": {
+          "metricId": { "$ref": "#/$defs/token" },
+          "criterionId": { "$ref": "#/$defs/token" },
+          "operation": { "enum": ["rate", "mean", "sum"] },
+          "denominator": { "const": "all-expected-records" },
+          "numeratorOutcomes": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": { "enum": ["PASS", "FAIL", "ERROR"] }
+          },
+          "comparator": { "enum": [">=", ">", "=", "<=", "<"] },
+          "threshold": { "type": "number" },
+          "claimedValue": { "type": ["number", "null"] }
+        },
+        "allOf": [
+          {
+            "if": { "properties": { "operation": { "const": "rate" } }, "required": ["operation"] },
+            "then": { "properties": { "numeratorOutcomes": { "type": "array", "minItems": 1 } } },
+            "else": { "properties": { "numeratorOutcomes": { "type": "array", "maxItems": 0 } } }
+          }
+        ]
+      }
+    },
+    "runs": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["runId", "status", "resultArtifactId"],
+        "properties": {
+          "runId": { "$ref": "#/$defs/token" },
+          "status": { "enum": ["completed", "failed", "timeout"] },
+          "resultArtifactId": { "oneOf": [{ "$ref": "#/$defs/token" }, { "type": "null" }] }
+        },
+        "allOf": [
+          {
+            "if": { "properties": { "status": { "const": "completed" } }, "required": ["status"] },
+            "then": { "properties": { "resultArtifactId": { "$ref": "#/$defs/token" } } },
+            "else": { "properties": { "resultArtifactId": { "type": "null" } } }
+          }
+        ]
+      }
+    },
+    "knownLimitations": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/token" } }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "auditStage": { "const": "pre-execution" } }, "required": ["auditStage"] },
+      "then": {
+        "properties": {
+          "runs": { "type": "array", "maxItems": 0 },
+          "metrics": { "type": "array", "items": { "type": "object", "properties": { "claimedValue": { "type": "null" } } } }
+        }
+      },
+      "else": {
+        "properties": {
+          "executionStartedAt": { "type": "string", "format": "date-time" },
+          "runs": { "type": "array", "minItems": 1 },
+          "metrics": { "type": "array", "items": { "type": "object", "properties": { "claimedValue": { "type": "number" } } } }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "token": { "type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$" },
+    "digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "uuid": { "type": "string", "format": "uuid" },
+    "tokenArray": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/token" } },
+    "actorArray": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/uuid" } },
+    "judgmentMethod": { "enum": ["deterministic-oracle", "independent-review", "self-report", "lexical-match"] },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifactId", "role", "locator", "digest", "mediaType", "availableAt", "visibleToRoles", "provenance"],
+      "properties": {
+        "artifactId": { "$ref": "#/$defs/token" },
+        "role": { "enum": ["fixture-manifest", "rubric", "oracle", "aggregation-rule", "timing-evidence", "result-records", "aggregate-claim", "evidence"] },
+        "locator": { "type": "string", "minLength": 1 },
+        "digest": { "$ref": "#/$defs/digest" },
+        "mediaType": { "enum": ["json", "jsonl", "text"] },
+        "availableAt": { "type": "string", "format": "date-time" },
+        "visibleToRoles": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "enum": ["author", "executor", "judge", "auditor"] }
+        },
+        "provenance": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["source", "observedAt", "evidenceRefs"],
+              "properties": {
+                "source": { "enum": ["git-revision", "signed-receipt", "trusted-system"] },
+                "observedAt": { "type": "string", "format": "date-time" },
+                "evidenceRefs": { "$ref": "#/$defs/tokenArray" }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}
