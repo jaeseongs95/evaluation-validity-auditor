@@ -155,6 +155,7 @@ function frameCheck(input) {
   if (frozenAt > auditedAt) return check("FRAME_FROZEN", "FAIL", "FRAME_FROZEN_AFTER_AUDIT");
   if (startedAt !== null && frozenAt > startedAt) return check("FRAME_FROZEN", "FAIL", "FRAME_FROZEN_AFTER_EXECUTION");
   if (input.auditStage === "pre-execution" && startedAt !== null && auditedAt > startedAt) return check("FRAME_FROZEN", "FAIL", "AUDIT_NOT_PRE_EXECUTION");
+  if (input.auditStage === "post-execution" && startedAt !== null && auditedAt < startedAt) return check("FRAME_FROZEN", "FAIL", "AUDIT_NOT_POST_EXECUTION");
   return check("FRAME_FROZEN", "PASS", "CHECK_PASSED");
 }
 
@@ -200,7 +201,10 @@ function methodCheck(input, states) {
       return check("JUDGMENT_METHOD_VALID", "FAIL", methods.length === 1 && methods[0] === "self-report" ? "SELF_REPORT_ONLY" : "JUDGMENT_METHOD_MISMATCH", criterion.evidenceRefs);
     }
     const oracle = criterion.oracleArtifactId ? states.get(criterion.oracleArtifactId) : null;
-    if (!oracle || oracle.artifact.role !== "oracle" || !oracle.exists || !oracle.digestMatches || criterion.evidenceRefs.some((ref) => !artifactIdSet.has(ref))) {
+    if (!oracle || !oracle.exists) {
+      return check("JUDGMENT_METHOD_VALID", "BLOCKED", "ARTIFACT_MISSING", [criterion.oracleArtifactId].filter(Boolean));
+    }
+    if (oracle.artifact.role !== "oracle" || !oracle.digestMatches || criterion.evidenceRefs.some((ref) => !artifactIdSet.has(ref))) {
       return check("JUDGMENT_METHOD_VALID", "FAIL", "ORACLE_BINDING_INVALID", [criterion.oracleArtifactId, ...criterion.evidenceRefs].filter(Boolean));
     }
     if (criterion.kind === "semantic" && criterion.evidenceRefs.length === 0) return check("JUDGMENT_METHOD_VALID", "BLOCKED", "PROVENANCE_MISSING");
@@ -238,8 +242,17 @@ function posthocCheck(input, states) {
   const controls = [...states.values()].filter((state) => CONTROL_ROLES.includes(state.artifact.role));
   const posthoc = controls.some((state) => Date.parse(state.artifact.availableAt) > startedAt
     || (state.artifact.provenance && Date.parse(state.artifact.provenance.observedAt) > startedAt));
+  const auditedAt = Date.parse(input.auditedAt);
+  const resultEvidence = [...states.values()].filter((state) => POST_ROLES.includes(state.artifact.role));
+  const unavailableAtAudit = input.auditStage === "post-execution" && resultEvidence.some((state) => {
+    const availableAt = Date.parse(state.artifact.availableAt);
+    const observedAt = state.artifact.provenance ? Date.parse(state.artifact.provenance.observedAt) : availableAt;
+    return availableAt < startedAt || availableAt > auditedAt || observedAt < startedAt || observedAt > auditedAt;
+  });
   return posthoc
     ? check("NO_POSTHOC_INPUT", "FAIL", "POSTHOC_INPUT", controls.map((state) => state.artifact.artifactId))
+    : unavailableAtAudit
+      ? check("NO_POSTHOC_INPUT", "FAIL", "RESULT_EVIDENCE_NOT_AVAILABLE_AT_AUDIT", resultEvidence.map((state) => state.artifact.artifactId))
     : check("NO_POSTHOC_INPUT", "PASS", "CHECK_PASSED", controls.map((state) => state.artifact.artifactId));
 }
 
@@ -303,8 +316,9 @@ function nearlyEqual(left, right) {
   return Math.abs(left - right) <= 1e-12 * Math.max(1, Math.abs(left), Math.abs(right));
 }
 
-function recompute(input, records, prerequisitePassed) {
-  if (!prerequisitePassed) return { check: check("AGGREGATE_RECOMPUTED", "FAIL", "AGGREGATION_INVALID"), metrics: [] };
+function recompute(input, records, prerequisites) {
+  if (prerequisites.some((item) => item.status === "FAIL")) return { check: check("AGGREGATE_RECOMPUTED", "FAIL", "AGGREGATION_INVALID"), metrics: [] };
+  if (prerequisites.some((item) => item.status === "BLOCKED")) return { check: check("AGGREGATE_RECOMPUTED", "BLOCKED", "ARTIFACT_MISSING"), metrics: [] };
   const byKey = new Map(records.map((record) => [`${record.runId}\u0000${record.caseId}\u0000${record.criterionId}`, record]));
   const metrics = [];
   for (const metric of input.metrics) {
@@ -335,7 +349,9 @@ function recompute(input, records, prerequisitePassed) {
   return { check: check("AGGREGATE_RECOMPUTED", "PASS", "CHECK_PASSED"), metrics };
 }
 
-function claimCheck(input, states, metrics) {
+function claimCheck(input, states, metrics, aggregateStatus) {
+  if (aggregateStatus === "BLOCKED") return check("CLAIM_MATCHES", "BLOCKED", "ARTIFACT_MISSING");
+  if (aggregateStatus === "FAIL") return check("CLAIM_MATCHES", "FAIL", "AGGREGATION_INVALID");
   const state = oneRole(states, "aggregate-claim");
   if (!state?.exists) return check("CLAIM_MATCHES", "BLOCKED", "AGGREGATE_CLAIM_MISSING");
   const parsed = parseJsonState(state, validateAggregateClaimSchema);
@@ -397,9 +413,9 @@ export async function analyzeEvaluation(input, options = {}) {
     const result = parseResults(input, states);
     checks.push(run, result.check);
     records = result.records;
-    const aggregate = recompute(input, records, run.status === "PASS" && result.check.status === "PASS" && caseManifest.check.status === "PASS");
+    const aggregate = recompute(input, records, [run, result.check, caseManifest.check]);
     metrics = aggregate.metrics;
-    checks.push(aggregate.check, claimCheck(input, states, metrics));
+    checks.push(aggregate.check, claimCheck(input, states, metrics, aggregate.check.status));
   }
   const verdict = verdictFor(checks);
   const expectedResults = input.expected.caseIds.length * input.expected.runIds.length * input.expected.criterionIds.length;
@@ -434,7 +450,13 @@ export async function analyzeEvaluation(input, options = {}) {
 }
 
 export async function validateReport(validation, options = {}) {
-  if (!validateValidationSchema(validation)) return [`validation envelope schema validation failed: ${JSON.stringify(validateValidationSchema.errors)}`];
+  if (!validation || typeof validation !== "object" || Array.isArray(validation)) throw new InputError("EvaluationValidityValidation.v1 must be an object.");
+  if (!validateValidationSchema(validation)) {
+    const schemaErrors = structuredClone(validateValidationSchema.errors ?? []);
+    const reportOnly = schemaErrors.length > 0 && schemaErrors.every((error) => error.instancePath === "/report" || error.instancePath.startsWith("/report/"));
+    if (reportOnly) return [`report schema validation failed: ${JSON.stringify(schemaErrors)}`];
+    throw new InputError("EvaluationValidityValidation.v1 input validation failed.", { errors: schemaErrors });
+  }
   const errors = [];
   const requestDigest = sha256Canonical(validation.request);
   if (validation.requestArtifact.digest !== requestDigest) errors.push("requestArtifact.digest does not match the canonical frozen request");
@@ -446,6 +468,7 @@ export async function validateReport(validation, options = {}) {
     const expected = await analyzeEvaluation(validation.request, options);
     if (canonicalJson(expected) !== canonicalJson(validation.report)) errors.push("report does not match the current request and artifact evidence");
   } catch (error) {
+    if (error instanceof InputError) throw error;
     errors.push(`request cannot substantiate report: ${error instanceof Error ? error.message : String(error)}`);
   }
   return errors;

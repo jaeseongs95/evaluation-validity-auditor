@@ -100,6 +100,26 @@ test("digest mismatch fails while a missing artifact blocks", async () => {
   assert.ok(blocked.blockingCodes.includes("ARTIFACT_MISSING"));
 });
 
+test("missing post-execution evidence remains BLOCKED instead of becoming FAIL", async () => {
+  for (const role of ["oracle", "fixture-manifest", "result-records"]) {
+    const { root, post } = await makePostFixture();
+    post.artifacts.find((item) => item.role === role).locator = `missing-${role}.json`;
+    const report = await analyzeEvaluation(post, { artifactRoot: root });
+    assert.equal(report.verdict, "BLOCKED", role);
+    assert.equal(report.checks.some((item) => item.status === "FAIL"), false, role);
+  }
+});
+
+test("a post-execution audit cannot predate execution or its result evidence", async () => {
+  const { root, post } = await makePostFixture();
+  post.auditedAt = "2026-01-01T00:00:00Z";
+  const report = await analyzeEvaluation(post, { artifactRoot: root });
+  assert.equal(report.verdict, "FAIL");
+  assert.equal(report.qualifiesAsQualityOrReleaseEvidence, false);
+  assert.ok(report.blockingCodes.includes("AUDIT_NOT_POST_EXECUTION"));
+  assert.ok(report.blockingCodes.includes("RESULT_EVIDENCE_NOT_AVAILABLE_AT_AUDIT"));
+});
+
 test("aggregate claims that omit failed-run denominators fail", async () => {
   const { root, post } = await makePostFixture();
   post.metrics[0].claimedValue = 0.5;
@@ -190,6 +210,9 @@ test("digest and report-validation CLIs implement the documented exit contract",
   assert.equal(JSON.parse(invalidReport.stdout).valid, false);
   const invalidInvocation = await runCli(["scripts/validate-report.mjs", "--artifact-root", root], "");
   assert.equal(invalidInvocation.code, 2);
+  const missingRoot = await runCli(["scripts/validate-report.mjs", "--request", requestPath, "--request-artifact", artifactPath, "--report", reportPath, "--artifact-root", path.join(root, "absent")], "");
+  assert.equal(missingRoot.code, 2);
+  assert.match(JSON.parse(missingRoot.stdout).errors[0], /Artifact root/u);
 });
 
 function runCli(args, input) {
